@@ -1,16 +1,46 @@
+import os
+import json
+import pprint
+import requests
+
+from dotenv import load_dotenv
+from langchain.prompts import PromptTemplate
+from langchain.agents import initialize_agent, Tool
+from langchain.agents import AgentType
+from langchain_openai import ChatOpenAI
+from langchain.prompts import MessagesPlaceholder
+from langchain.memory import ConversationSummaryBufferMemory
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.chains.summarize import load_summarize_chain
+from langchain.tools import BaseTool
+from langchain.schema import SystemMessage
+from pydantic import BaseModel, Field
+from typing import Type
+from bs4 import BeautifulSoup
+from serpapi import GoogleSearch
+
 from forge.actions import ActionRegister
 from forge.sdk import (
     Agent,
     AgentDB,
-    ForgeLogger,
     Step,
     StepRequestBody,
+    Workspace,
+    ForgeLogger,
     Task,
     TaskRequestBody,
-    Workspace,
+    PromptEngine,
+    chat_completion_request,
 )
 
 LOG = ForgeLogger(__name__)
+
+#~~~~~~~~~~~~~~~~~API setup~~~~~~~~~~~~~~~~~
+
+load_dotenv('.env')
+# browserless_api_key = os.getenv('BROWSERLESS_API_KEY')
+serp_api_key = os.getenv('SERPAPI_API_KEY')
+open_ai_api = os.getenv('OPENAI_API_KEY')
 
 
 class ForgeAgent(Agent):
@@ -76,6 +106,7 @@ class ForgeAgent(Agent):
         super().__init__(database, workspace)
         self.abilities = ActionRegister(self)
 
+
     async def create_task(self, task_request: TaskRequestBody) -> Task:
         """
         The agent protocol, which is the core of the Forge, works by creating a task and then
@@ -120,27 +151,117 @@ class ForgeAgent(Agent):
         if they want the agent to continue or not.
         """
         # An example that
+        self.workspace.write(task_id=task_id, path="output.txt", data=b"Research Agent is thinking...")
         step = await self.db.create_step(
             task_id=task_id, input=step_request, is_last=True
         )
+        step_input = 'None'
+        if step.input:
+            step_input = step.input[:19]
+        message = f'	🔄 Step executed: {step.step_id} input: {step_input}'
+        if step.is_last:
+            message = (
+                f'	✅ Final Step completed: {step.step_id} input: {step_input}'
+            )
 
-        self.workspace.write(task_id=task_id, path="output.txt", data=b"Washington D.C")
-
-        await self.db.create_artifact(
+        LOG.info(message)
+        artifact = await self.db.create_artifact(
             task_id=task_id,
             step_id=step.step_id,
-            file_name="output.txt",
-            relative_path="",
+            file_name='output.txt',
+            relative_path='',
             agent_created=True,
         )
-
-        step.output = "Washington D.C"
-
-        LOG.info(
-            f"\t✅ Final Step completed: {step.step_id}. \n"
-            + f"Output should be placeholder text Washington D.C. You'll need to \n"
-            + f"modify execute_step to include LLM behavior. Follow the tutorial "
-            + f"if confused. "
-        )
-
+        LOG.info(f'Received input for task {task_id}: {step_request.input}')
+        step.output = customstep(step_request.input)
         return step
+
+#~~~~~~~~~~~~~~~~~AGENT TOOLS~~~~~~~~~~~~~~~~~~
+
+def search(query):
+    params = {
+    "q": query,
+    "hl": "en",
+    "gl": "us",
+    "google_domain": "google.com",
+    "api_key": serp_api_key
+    }
+
+    search = GoogleSearch(params)
+    results = search.get_dict()
+    return results['organic_results'][0]['snippet']
+
+
+def summary(content):
+    # The agent processes the content and generates a concise summary.
+    llm = ChatOpenAI(temperature=0, model="gpt-3.5-turbo-16k-0613")
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        separators=["\n\n", "\n"], chunk_size=10000, chunk_overlap=500)
+    docs = text_splitter.create_documents([content])
+    map_prompt = """
+    Write a summary of the following text for {objective}:
+    "{text}"
+    SUMMARY:
+    """
+    map_prompt_template = PromptTemplate(
+        template=map_prompt, input_variables=["text", "objective"])
+
+    summary_chain = load_summarize_chain(
+        llm=llm,
+        chain_type='map_reduce',
+        map_prompt=map_prompt_template,
+        combine_prompt=map_prompt_template,
+        verbose=False
+    )
+
+    output = summary_chain.run(input_documents=docs, objective="feeding into an LLM's context window")
+
+    return output
+
+    
+tools = [
+    Tool(
+        name="Search",
+        func=search,
+        description="useful for when you need to answer questions about current events, data. You should ask targeted questions"
+    ),
+    Tool(
+        name="Summary",
+        func=summary,
+        description="useful for when you need to summarize or compress any content"
+    ),
+]
+
+#~~~~~~~~~~~~~~~~~~AGENT SPEC~~~~~~~~~~~~~~~~~~~~
+system_message = SystemMessage(
+    content="""You are a world class researcher, who can do detailed research on any topic and produce facts based results; 
+            you do not make things up, you will try as hard as possible to gather facts & data to back up the research
+            ...
+            (include other rules and guidelines here)
+            """
+)
+
+agent_kwargs = {
+    "extra_prompt_messages": [MessagesPlaceholder(variable_name="memory")],
+    "system_message": system_message,
+}
+
+llm = ChatOpenAI(temperature=0, model='gpt-3.5-turbo-16k-0613')
+
+
+memory = ConversationSummaryBufferMemory(
+    memory_key="memory", return_messages=True, llm=llm, max_token_limit=1000)
+
+agent = initialize_agent(
+    tools,
+    llm,
+    agent=AgentType.OPENAI_FUNCTIONS,
+    verbose=True,
+    agent_kwargs=agent_kwargs,
+    memory=memory,
+)
+
+def customstep(query):
+    result = agent({"input": query})
+    return result['output']
