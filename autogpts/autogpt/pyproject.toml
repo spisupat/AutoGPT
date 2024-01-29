@@ -68,8 +68,8 @@ webdriver-manager = "*"
 openapi-python-client = "^0.14.0"
 
 # Benchmarking
-# agbenchmark = { path = "../../benchmark", optional = true }
-agbenchmark = {git = "https://github.com/Significant-Gravitas/AutoGPT.git", subdirectory = "benchmark", optional = true}
+agbenchmark = { path = "../../benchmark", optional = true }
+# agbenchmark = {git = "https://github.com/Significant-Gravitas/AutoGPT.git", subdirectory = "benchmark", optional = true}
 google-cloud-logging = "^3.8.0"
 google-cloud-storage = "^2.13.0"
 psycopg2-binary = "^2.9.9"
@@ -101,7 +101,8 @@ pytest-integration = "*"
 pytest-mock = "*"
 pytest-recording = "*"
 pytest-xdist = "*"
-vcrpy = {git = "https://github.com/Significant-Gravitas/vcrpy.git", rev = "master"}
+vcrpy = { path = "../../../vcrpy", optional = true }
+# vcrpy = {git = "https://github.com/Significant-Gravitas/vcrpy.git", rev = "master"}
 
 
 [build-system]
